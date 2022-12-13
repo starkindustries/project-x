@@ -3,6 +3,7 @@ import keyboard
 import os
 import copy
 from enum import Enum
+import hashlib
 # from sys import exit
 
 # constants
@@ -33,13 +34,16 @@ WORD_ITEM = {
 POTATO_GAINS = 5
 MAX_HEALTH = 100
 MAX_SATIATION = 100
-HUNGER_INTERVAL = 30
+HUNGER_INTERVAL = 20
+
 
 # Mesasges
 SHIP_OUT_OF_SEEDS = "Ship currently has 0 seeds. Try again later."
-MESSAGE_LIMIT = 30
+MESSAGE_TIME_LIMIT = 10
+MAX_MESSAGES = 10
 
 # globals
+clock_start = 0
 clock = 0
 world = []
 item_map = {} # { (x, y) : 'item' }
@@ -54,8 +58,13 @@ ship_pos = ()
 feedback_messages = []
 seed_tracker = [] # [ (x, y, clock) ]
 seed_stages = [SEED, SEEDLING, SPROUT, POTATO]
-seed_growth_time = 100
+seed_growth_time = 30
 last_observed_item = None
+prev_state_hash = None
+hunger_last_decrement = 0
+
+input_time = 0.0
+input_interval = .15
 
 # def is_matching(coord1, coord2):
 #     assert len(coord1) == len(coord2) == 2
@@ -84,6 +93,10 @@ def parse_tile(x, y, tile, world_row):
 
 def load_world(filename):
     global world
+    global clock_start
+
+    clock_start = int(time.time())
+
     with open(filename, 'r', encoding='utf8') as handle:
         for y, line in enumerate(handle):
             line = line.strip()
@@ -94,6 +107,42 @@ def load_world(filename):
     for row in world:
         print(*row, sep='')
     # input("Press enter to continue...")
+
+
+def poll_user_input():
+    global input_time
+    
+    if time.time() - input_time < input_interval:
+        return
+
+    x, y = player["pos"]
+    if keyboard.is_pressed('w') and world[y-1][x] != WALL:
+        player["pos"] = (x, y-1)
+        input_time = time.time()
+    if keyboard.is_pressed('a') and world[y][x-1] != WALL:
+        player["pos"] = (x-1, y)
+        input_time = time.time()
+    if keyboard.is_pressed('s') and world[y+1][x] != WALL:
+        player["pos"] = (x, y+1)
+        input_time = time.time()
+    if keyboard.is_pressed('d') and world[y][x+1] != WALL:
+        player["pos"] = (x+1, y)
+        input_time = time.time()
+    if keyboard.is_pressed('space') and player["equipped"]:
+        player_action()
+        input_time = time.time()
+    if keyboard.is_pressed('1'):
+        input_time = time.time()
+        if is_player_in_ship():
+            try_dispense_seeds()
+        else:
+            try_equip_item(1)
+    if keyboard.is_pressed('2'):
+        input_time = time.time()
+        try_equip_item(2)
+    if keyboard.is_pressed('3'):
+        input_time = time.time()
+        try_equip_item(3)
 
 
 def player_action():
@@ -113,8 +162,9 @@ def player_action():
         seed_tracker.append( (x, y, clock) )
         print_feedback("You planted the mighty seed in fertile soil.")
         player["inventory"][SEED] -= 1
-        if player["inventory"][SEED] == 0:
+        if player["inventory"][SEED] < 1:
             del player["inventory"][SEED]
+            player["equipped"] = None
     elif player["equipped"] == SEED and world[y][x] == BLANK:
         print_feedback("The soil is not tilled. It would be a shame to waste a seed..")
 
@@ -130,6 +180,11 @@ def print_ship_menu():
 def print_feedback(message):
     global feedback_messages
     feedback_messages.append(( message, clock ))
+
+    num_messages = len(feedback_messages)
+    for _ in range(0, num_messages - MAX_MESSAGES, 1):
+        feedback_messages.pop(0)
+
 
 
 def try_dispense_seeds():
@@ -148,6 +203,8 @@ def try_equip_item(keypressed):
     if (keypressed) > len(items):
         return
     item = items[keypressed - 1]    
+    if item == player["equipped"]:
+        return
     if item == POTATO:
         print_feedback("You feasted on the super potato satisfied your hunger")
         player["hunger"] = MAX_SATIATION
@@ -196,33 +253,18 @@ def observe_world():
         print_feedback(f"This looks like a {word_item}")
     last_observed_item = item
 
+
 def process():
     global player_in_ship
+    global clock
+    global hunger_last_decrement
+
+    clock = int(time.time()) - clock_start
 
     observe_world()
 
     # user input
-    x, y = player["pos"]
-    if keyboard.is_pressed('w') and world[y-1][x] != WALL:
-        player["pos"] = (x, y-1)
-    if keyboard.is_pressed('a') and world[y][x-1] != WALL:
-        player["pos"] = (x-1, y)
-    if keyboard.is_pressed('s') and world[y+1][x] != WALL:
-        player["pos"] = (x, y+1)
-    if keyboard.is_pressed('d') and world[y][x+1] != WALL:
-        player["pos"] = (x+1, y)
-    if keyboard.is_pressed('space') and player["equipped"]:
-        player_action()
-    if keyboard.is_pressed('1'):
-        if is_player_in_ship():
-            try_dispense_seeds()
-        else:
-            try_equip_item(1)
-    if keyboard.is_pressed('2'):
-        try_equip_item(2)
-    if keyboard.is_pressed('3'):
-        try_equip_item(3)
-
+    poll_user_input()
 
     # check for items
     if player["pos"] in item_map:        
@@ -259,20 +301,37 @@ def process():
             seed_tracker[i] = (x, y, clock)
                 
     # decrement player hunger
-    if int(clock) % HUNGER_INTERVAL == 0:
+    if clock % HUNGER_INTERVAL == 0 and clock != hunger_last_decrement:
+        hunger_last_decrement = clock
         player["hunger"] -= 1
 
     # delete expired messages
     for i, message_tuple in enumerate(feedback_messages):
         message, message_clock = message_tuple
-        if clock - message_clock > MESSAGE_LIMIT:
+        if clock - message_clock > MESSAGE_TIME_LIMIT:
             del feedback_messages[i]
 
 
 def render():
-    global clock
-    global feedback_messages
+    global feedback_messages    
+    global prev_state_hash
+    
+    # Check if render required
+    world_state = []
+    world_state.append(player)
+    world_state.append(world)
+    world_state.append(item_map)
+    world_state.append(feedback_messages)
+    world_hash = hashlib.md5(str(world_state).encode('utf8')).hexdigest()
+        
+    if prev_state_hash == world_hash:
+        return
 
+    prev_state_hash = world_hash
+
+    # Render scene
+
+    os.system('cls')
     world_scene = copy.deepcopy(world)
     
     # add player to scene
@@ -290,11 +349,7 @@ def render():
         
     # render game
     for row in world_scene:
-        print(*row, sep='')
-        
-    # increment clock    
-    clock += 1
-    print("clock", clock)
+        print(*row, sep='')        
     
     print_player_stats()
     print_inventory()
@@ -307,11 +362,13 @@ def render():
         message, _ = message_tuple
         print(message)
 
+    print("state:", prev_state_hash)
 
-if __name__ == "__main__":
+
+if __name__ == "__main__":        
     load_world("world.txt")
     while True:
         process()
         render()
-        time.sleep(0.12)
-        os.system('cls')
+        # time.sleep(0.12)
+        
