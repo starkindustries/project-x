@@ -4,6 +4,7 @@ import os
 import copy
 from enum import Enum
 import hashlib
+from metabots.metabolism import Potato
 # from sys import exit
 
 # constants
@@ -57,12 +58,16 @@ player = {
 ship_pos = ()
 feedback_messages = []
 seed_tracker = [] # [ (x, y, clock) ]
+potato_tracker = []
 seed_stages = [SEED, SEEDLING, SPROUT, POTATO]
-seed_growth_time = 30
+seed_growth_time = 30 # [(SEED, 30), (SEEDLING, 40), (SPROUT, 50), (POTATO, 60)]
 last_observed_item = None
 prev_state_hash = None
 hunger_last_decrement = 0
 
+# Time
+timestamp = 0.0
+delta = 0.0
 input_time = 0.0
 input_interval = .15
 
@@ -148,6 +153,7 @@ def poll_user_input():
 def player_action():
     global world    
     global seed_tracker
+    global potato_tracker
 
     # Ignore 'spacebar' action if player in ship
     if is_player_in_ship():
@@ -159,7 +165,12 @@ def player_action():
         print_feedback("You tilled the earth and made the land fertile.")
     elif player["equipped"] == SEED and world[y][x] == TILLED_SOIL:
         world[y][x] = SEED
-        seed_tracker.append( (x, y, clock) )
+        
+        # Metabolism
+        potato = Potato((x, y))
+        potato_tracker.append(potato)
+        
+        seed_tracker.append( (x, y, clock) )        
         print_feedback("You planted the mighty seed in fertile soil.")
         player["inventory"][SEED] -= 1
         if player["inventory"][SEED] < 1:
@@ -167,6 +178,29 @@ def player_action():
             player["equipped"] = None
     elif player["equipped"] == SEED and world[y][x] == BLANK:
         print_feedback("The soil is not tilled. It would be a shame to waste a seed..")
+
+def grow_the_seeds(delta):
+    # grow the seeds
+    for potato in potato_tracker:
+        potato.tick(delta)
+        x, y = potato.position
+        world[y][x] = potato.get_current_lifecycle()
+        
+
+    # for i, seed_tuple in enumerate(seed_tracker):
+    #     x, y, seed_clock = seed_tuple
+    #     if clock - seed_clock < seed_growth_time:
+    #         continue        
+    #     index = seed_stages.index(world[y][x])
+    #     index += 1
+    #     if index < len(seed_stages) - 1:            
+    #         world[y][x] = seed_stages[index]
+    #     if index == len(seed_stages) - 1:
+    #         world[y][x] = BLANK
+    #         item_map[(x, y)] = POTATO
+    #         del seed_tracker[i]
+    #     else:
+    #         seed_tracker[i] = (x, y, clock)
 
 
 def is_player_in_ship():
@@ -258,7 +292,13 @@ def process():
     global player_in_ship
     global clock
     global hunger_last_decrement
-
+    global delta
+    global timestamp
+    
+    temp_timestamp = time.time()
+    delta = temp_timestamp - timestamp
+    timestamp = temp_timestamp
+    
     clock = int(time.time()) - clock_start
 
     observe_world()
@@ -284,21 +324,7 @@ def process():
     if player["equipped"] is None and player["inventory"]:
         try_equip_item(1)
 
-    # grow the seeds
-    for i, seed_tuple in enumerate(seed_tracker):
-        x, y, seed_clock = seed_tuple
-        if clock - seed_clock < seed_growth_time:
-            continue        
-        index = seed_stages.index(world[y][x])
-        index += 1
-        if index < len(seed_stages) - 1:            
-            world[y][x] = seed_stages[index]
-        if index == len(seed_stages) - 1:
-            world[y][x] = BLANK
-            item_map[(x, y)] = POTATO
-            del seed_tracker[i]
-        else:
-            seed_tracker[i] = (x, y, clock)
+    grow_the_seeds(delta)
                 
     # decrement player hunger
     if clock % HUNGER_INTERVAL == 0 and clock != hunger_last_decrement:
@@ -307,7 +333,7 @@ def process():
 
     # delete expired messages
     for i, message_tuple in enumerate(feedback_messages):
-        message, message_clock = message_tuple
+        _, message_clock = message_tuple
         if clock - message_clock > MESSAGE_TIME_LIMIT:
             del feedback_messages[i]
 
